@@ -1,11 +1,12 @@
 ---
 name: trello-stories
-description: Analyse a code repository and a requested change, settle the open points with the user, then cut the change into small implementation stories and create them as Trello cards (simple Spanish card text with Qué/Para quién/Por qué/Criterios de aceptación/Dependencias, story points in the title, acceptance-criteria checklist, blocked-by/blocks card links, and an English tech-notes .md attachment that is the goal prompt for the implementing agent). Use when the user asks to "write the stories on Trello", "crea le storie su Trello", "escribe las historias en Trello", or to plan a change of a repo as Trello cards.
+description: Plan a new feature or a change to existing code as Trello stories. Analyse the code repository and the requested feature/change, settle the open points with the user, then cut the change into small implementation stories and create them as Trello cards (simple Spanish card text with Qué/Para quién/Por qué/Criterios de aceptación/Dependencias, story points in the title, acceptance-criteria checklist, blocked-by/blocks card links, and an English tech-notes .md attachment that is the goal prompt for the implementing agent). Use when the user asks to "write the stories on Trello", "crea le storie su Trello", "escribe las historias en Trello", "plan this new feature on Trello", "storie per la nuova feature", "historias para esta modificación", or to plan a new feature or a modification of a repo as Trello cards.
 ---
 
 # Repo change → Trello stories
 
-Goal: from one repository (or a few) and a description of what should change, produce the full set of
+Goal: from one repository (or a few) and a description of a **new feature or a change to existing behaviour**
+(also refactorings and bug fixes that need several steps), produce the full set of
 stories, each small enough for one agent PR, as cards on a Trello board. The output is ONLY Trello cards
 (+ their md attachments). Nothing is written to the repo.
 
@@ -27,7 +28,8 @@ sentences, everyday words, no jargon unless it is a technical name). **Tech note
 ## Inputs (ask for what is missing, in this order)
 1. **Repository**: GitHub `org/repo` or URL, or a local path. Several repos are fine. Ask which branch is the
    base if it is not the default branch.
-2. **What should change**: the goal in the user's words (new feature, change of behaviour, refactoring, bug).
+2. **What to build or change**: the goal in the user's words — a new feature, or a modification of existing
+   behaviour (also refactoring or a bug that needs several steps).
    Ask for links to designs, tickets, docs, examples if they exist.
 3. **Board and placement**: board (default from `trello use`), target list (default: first list, usually
    "To Do"), label(s) for this change (existing label, or create one with the user's OK, e.g. one label per
