@@ -352,12 +352,12 @@ def cmd_create(args):
         body["due"] = args.due
     c = post("/cards", body)
     if args.ac:
-        add_checklist(c["id"], AC_CHECKLIST, args.ac)
+        add_checklist(c["id"], args.ac_name, args.ac)
     for f in args.attach or []:
         attach_file(c["id"], f)
     for other in args.link or []:
         link_cards(args, c["id"], other)
-    print(f"#{c['idShort']} {c['shortUrl']}  {c['name']}")
+    print_card_ref(c, args.json)
 
 
 def cmd_update(args):
@@ -384,14 +384,21 @@ def cmd_update(args):
     for m in args.remove_member or []:
         delete(f"/cards/{cid}/idMembers/{member_id(args, m)}")
     if args.ac:
-        cl = next((x for x in get(f"/cards/{cid}/checklists") if x["name"] == AC_CHECKLIST), None)
+        cl = next((x for x in get(f"/cards/{cid}/checklists") if x["name"] == args.ac_name), None)
         if cl:
             for it in args.ac:
                 post(f"/checklists/{cl['id']}/checkItems", name=it)
         else:
-            add_checklist(cid, AC_CHECKLIST, args.ac)
-    c = get(f"/cards/{cid}", fields="name,shortUrl,idShort")
-    print(f"#{c['idShort']} {c['shortUrl']}  {c['name']}")
+            add_checklist(cid, args.ac_name, args.ac)
+    c = get(f"/cards/{cid}", fields="name,shortUrl,shortLink,idShort")
+    print_card_ref(c, args.json)
+
+
+def print_card_ref(c, as_json=False):
+    if as_json:
+        out_json({k: c.get(k) for k in ("id", "idShort", "shortLink", "shortUrl", "name")})
+    else:
+        print(f"#{c['idShort']} {c['shortUrl']}  {c['name']}")
 
 
 def cmd_move(args):
@@ -411,6 +418,10 @@ def cmd_comment(args):
 
 def cmd_checklist(args):
     cid = card_id(args, args.card)
+    if args.replace:
+        for cl in get(f"/cards/{cid}/checklists"):
+            if cl["name"] == args.name:
+                delete(f"/checklists/{cl['id']}")
     add_checklist(cid, args.name, args.items)
     print(f"checklist '{args.name}' added ({len(args.items)} items)")
 
@@ -443,19 +454,32 @@ def attach_file(cid, path):
             files={"file": (fname, content, ctype)})
 
 
+def attach_url_once(cid, url):
+    """Attach a URL unless the card already has an attachment pointing to it."""
+    if any(a.get("url") == url for a in get(f"/cards/{cid}/attachments", fields="url")):
+        return False
+    post(f"/cards/{cid}/attachments", url=url)
+    return True
+
+
 def link_cards(args, cid, other_ref):
     other = get(f"/cards/{card_id(args, other_ref)}", fields="shortUrl,id")
-    post(f"/cards/{cid}/attachments", url=other["shortUrl"])
+    attach_url_once(cid, other["shortUrl"])
     if getattr(args, "both_ways", False):
         me = get(f"/cards/{cid}", fields="shortUrl")
-        post(f"/cards/{other['id']}/attachments", url=me["shortUrl"])
+        attach_url_once(other["id"], me["shortUrl"])
 
 
 def cmd_attach(args):
     cid = card_id(args, args.card)
     if re.match(r"https?://", args.target):
-        post(f"/cards/{cid}/attachments", url=args.target)
+        attach_url_once(cid, args.target)
     else:
+        if args.replace:
+            fname = os.path.basename(os.path.expanduser(args.target))
+            for a in get(f"/cards/{cid}/attachments", fields="name"):
+                if a["name"] == fname:
+                    delete(f"/cards/{cid}/attachments/{a['id']}")
         attach_file(cid, args.target)
     print("attached")
 
@@ -531,6 +555,8 @@ def main():
     s.add_argument("--link", action="append", help="related card (attached as card link); repeatable")
     s.add_argument("--both-ways", action="store_true", help="also link back from the related card")
     s.add_argument("--pos", default="bottom", help="top|bottom|number")
+    s.add_argument("--ac-name", default=AC_CHECKLIST, help="checklist name for --ac")
+    s.add_argument("--json", action="store_true", help="print card ref as JSON")
 
     s = sp("update", cmd_update, "update a card")
     s.add_argument("card")
@@ -540,6 +566,8 @@ def main():
     s.add_argument("--add-label", action="append"); s.add_argument("--remove-label", action="append")
     s.add_argument("--add-member", action="append"); s.add_argument("--remove-member", action="append")
     s.add_argument("--ac", action="append", help="append acceptance criterion")
+    s.add_argument("--ac-name", default=AC_CHECKLIST, help="checklist name for --ac")
+    s.add_argument("--json", action="store_true", help="print card ref as JSON")
 
     s = sp("move", cmd_move, "move card to list"); s.add_argument("card"); s.add_argument("list")
     s.add_argument("--pos", default="bottom")
@@ -549,11 +577,13 @@ def main():
 
     s = sp("checklist", cmd_checklist, "add checklist"); s.add_argument("card"); s.add_argument("name")
     s.add_argument("items", nargs="+")
+    s.add_argument("--replace", action="store_true", help="delete existing checklists with the same name first")
 
     s = sp("check", cmd_check, "tick checklist item (substring or 1-based index)")
     s.add_argument("card"); s.add_argument("item"); s.add_argument("--undo", action="store_true")
 
-    s = sp("attach", cmd_attach, "attach file or URL"); s.add_argument("card"); s.add_argument("target")
+    s = sp("attach", cmd_attach, "attach file or URL (URLs are attached once)"); s.add_argument("card"); s.add_argument("target")
+    s.add_argument("--replace", action="store_true", help="delete attachments with the same file name first")
 
     s = sp("link", cmd_link, "link card to another card"); s.add_argument("card"); s.add_argument("other")
     s.add_argument("--both-ways", action="store_true")
