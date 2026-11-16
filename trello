@@ -1,0 +1,568 @@
+#!/usr/bin/env python3
+"""trello — minimal Trello CLI to use a board Jira-style.
+
+Credentials come from the macOS keychain:
+  security add-generic-password -U -a trello -s trello-api-key -w
+  security add-generic-password -U -a trello -s trello-token -w
+
+Default board: `trello use <board>` (stored in ~/.config/trello-cli/config.json),
+or env TRELLO_BOARD, or --board on any command.
+
+Story convention:
+  title        "[<points>] <title>"
+  description  Markdown
+  checklist    "Acceptance Criteria" (one item per AC)
+"""
+import argparse
+import json
+import mimetypes
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+
+API = "https://api.trello.com/1"
+CONFIG = os.path.expanduser("~/.config/trello-cli/config.json")
+AC_CHECKLIST = "Acceptance Criteria"
+POINTS_RE = re.compile(r"^\[(\d+(?:\.\d+)?)\]\s*")
+
+
+# ---------------------------------------------------------------- infra
+
+def die(msg, code=1):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def keychain(service):
+    try:
+        return subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        die(f"keychain item '{service}' not found")
+
+
+_AUTH = None
+
+
+def auth():
+    global _AUTH
+    if _AUTH is None:
+        _AUTH = {"key": keychain("trello-api-key"), "token": keychain("trello-token")}
+    return _AUTH
+
+
+def load_config():
+    try:
+        with open(CONFIG) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    with open(CONFIG, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def request(method, path, params=None, body=None, files=None):
+    q = dict(auth())
+    if params:
+        q.update({k: v for k, v in params.items() if v is not None})
+    url = f"{API}{path}?{urllib.parse.urlencode(q)}"
+    data, headers = None, {"Accept": "application/json"}
+    if files:
+        boundary = uuid.uuid4().hex
+        parts = []
+        for name, (fname, content, ctype) in files.items():
+            parts.append(
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; "
+                f"filename=\"{fname}\"\r\nContent-Type: {ctype}\r\n\r\n".encode() + content + b"\r\n"
+            )
+        for k, v in (body or {}).items():
+            parts.append(
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
+            )
+        data = b"".join(parts) + f"--{boundary}--\r\n".encode()
+        headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+    elif body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req) as r:
+            raw = r.read()
+            return json.loads(raw) if raw else None
+    except urllib.error.HTTPError as e:
+        die(f"{method} {path} -> {e.code}: {e.read().decode(errors='replace')[:500]}")
+
+
+get = lambda p, **kw: request("GET", p, params=kw)
+post = lambda p, body=None, **kw: request("POST", p, params=kw, body=body)
+put = lambda p, body=None, **kw: request("PUT", p, params=kw, body=body)
+delete = lambda p, **kw: request("DELETE", p, params=kw)
+
+
+def out_json(obj):
+    print(json.dumps(obj, indent=2, ensure_ascii=False))
+
+
+# ---------------------------------------------------------------- resolvers
+
+def board_ref(args):
+    b = getattr(args, "board", None) or os.environ.get("TRELLO_BOARD") or load_config().get("board")
+    if not b:
+        die("no board: run `trello use <board>` or pass --board")
+    m = re.search(r"trello\.com/b/([^/]+)", b)
+    return m.group(1) if m else b
+
+
+_CACHE = {}
+
+
+def board_lists(args):
+    k = ("lists", board_ref(args))
+    if k not in _CACHE:
+        _CACHE[k] = get(f"/boards/{board_ref(args)}/lists", fields="name")
+    return _CACHE[k]
+
+
+def board_labels(args):
+    k = ("labels", board_ref(args))
+    if k not in _CACHE:
+        _CACHE[k] = get(f"/boards/{board_ref(args)}/labels", fields="name,color", limit=1000)
+    return _CACHE[k]
+
+
+def board_members(args):
+    k = ("members", board_ref(args))
+    if k not in _CACHE:
+        _CACHE[k] = get(f"/boards/{board_ref(args)}/members", fields="username,fullName")
+    return _CACHE[k]
+
+
+def pick(items, needle, key, kind):
+    n = needle.lower()
+    exact = [i for i in items if (i.get(key) or "").lower() == n or i["id"] == needle]
+    if exact:
+        return exact[0]
+    partial = [i for i in items if n in (i.get(key) or "").lower()]
+    if len(partial) == 1:
+        return partial[0]
+    names = ", ".join(repr(i.get(key)) for i in (partial or items))
+    die(f"{kind} '{needle}' {'ambiguous' if partial else 'not found'}; candidates: {names}")
+
+
+def list_id(args, name):
+    return pick(board_lists(args), name, "name", "list")["id"]
+
+
+def label_id(args, name):
+    labels = board_labels(args)
+    # allow color for unnamed labels, e.g. "red"
+    for l in labels:
+        if not l["name"] and l["color"] == name.lower():
+            return l["id"]
+    return pick(labels, name, "name", "label")["id"]
+
+
+def member_id(args, name):
+    if name == "me":
+        return get("/members/me", fields="id")["id"]
+    return pick(board_members(args), name, "username", "member")["id"]
+
+
+def card_id(args, ref):
+    """Accept card id, shortLink, card URL, or board-local number (#12 / 12)."""
+    m = re.search(r"trello\.com/c/([^/]+)", ref)
+    if m:
+        return m.group(1)
+    num = ref.lstrip("#")
+    if num.isdigit() and len(num) < 8:
+        c = get(f"/boards/{board_ref(args)}/cards/{num}", fields="id")
+        return c["id"]
+    return ref
+
+
+# ---------------------------------------------------------------- helpers
+
+def split_points(title):
+    m = POINTS_RE.match(title)
+    return (m.group(1), title[m.end():]) if m else (None, title)
+
+
+def with_points(title, points):
+    _, bare = split_points(title)
+    return f"[{points}] {bare}" if points not in (None, "") else bare
+
+
+def read_text(value, path):
+    if path:
+        return sys.stdin.read() if path == "-" else open(os.path.expanduser(path)).read()
+    return value
+
+
+def fmt_card(c, lists_by_id, labels_by_id):
+    lst = lists_by_id.get(c.get("idList"), "?")
+    labs = ",".join(labels_by_id.get(i, "?") for i in c.get("idLabels", []))
+    return f"#{c.get('idShort', '?'):<4} {c.get('shortLink', ''):<9} {lst:<12} {c['name']}" + (f"  [{labs}]" if labs else "")
+
+
+def label_name(l):
+    return l["name"] or l["color"]
+
+
+def add_checklist(cid, name, items):
+    cl = post(f"/cards/{cid}/checklists", name=name)
+    for it in items:
+        post(f"/checklists/{cl['id']}/checkItems", name=it)
+    return cl
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_use(args):
+    b = get(f"/boards/{board_ref(argparse.Namespace(board=args.target))}", fields="name,shortLink")
+    cfg = load_config()
+    cfg["board"] = b["shortLink"]
+    save_config(cfg)
+    print(f"default board: {b['name']} ({b['shortLink']})")
+
+
+def cmd_me(args):
+    out_json(get("/members/me", fields="username,fullName,url"))
+
+
+def cmd_boards(args):
+    bs = get("/members/me/boards", fields="name,shortLink,closed,url", filter="open")
+    if args.json:
+        return out_json(bs)
+    for b in bs:
+        print(f"{b['shortLink']:<9} {b['name']}")
+
+
+def cmd_lists(args):
+    ls = board_lists(args)
+    if args.json:
+        return out_json(ls)
+    for l in ls:
+        print(f"{l['id']}  {l['name']}")
+
+
+def cmd_labels(args):
+    ls = board_labels(args)
+    if args.json:
+        return out_json(ls)
+    for l in ls:
+        print(f"{l['id']}  {l['color'] or '-':<10} {l['name']}")
+
+
+def cmd_members(args):
+    ms = board_members(args)
+    if args.json:
+        return out_json(ms)
+    for m in ms:
+        print(f"{m['username']:<24} {m['fullName']}")
+
+
+def cmd_label_create(args):
+    l = post(f"/boards/{board_ref(args)}/labels", name=args.name, color=args.color)
+    print(f"{l['id']}  {l['color']}  {l['name']}")
+
+
+def cmd_cards(args):
+    fields = "name,idList,idLabels,idShort,shortLink,due,idMembers"
+    if args.list:
+        cards = get(f"/lists/{list_id(args, args.list)}/cards", fields=fields)
+    else:
+        cards = get(f"/boards/{board_ref(args)}/cards", fields=fields, filter="closed" if args.archived else "open")
+    if args.label:
+        lid = label_id(args, args.label)
+        cards = [c for c in cards if lid in c["idLabels"]]
+    if args.mine:
+        me = member_id(args, "me")
+        cards = [c for c in cards if me in c["idMembers"]]
+    if args.json:
+        return out_json(cards)
+    lists_by_id = {l["id"]: l["name"] for l in board_lists(args)}
+    labels_by_id = {l["id"]: label_name(l) for l in board_labels(args)}
+    order = {l["id"]: i for i, l in enumerate(board_lists(args))}
+    for c in sorted(cards, key=lambda c: (order.get(c["idList"], 99), c["idShort"])):
+        print(fmt_card(c, lists_by_id, labels_by_id))
+
+
+def cmd_show(args):
+    cid = card_id(args, args.card)
+    c = get(f"/cards/{cid}", fields="name,desc,idList,idLabels,idShort,shortLink,shortUrl,due,dueComplete,idMembers,closed",
+            checklists="all", attachments="true", members="true", member_fields="username")
+    comments = get(f"/cards/{cid}/actions", filter="commentCard", limit=50)
+    if args.json:
+        c["comments"] = comments
+        return out_json(c)
+    lists_by_id = {l["id"]: l["name"] for l in board_lists(args)}
+    labels_by_id = {l["id"]: label_name(l) for l in board_labels(args)}
+    pts, title = split_points(c["name"])
+    print(f"#{c['idShort']} {title}")
+    print(f"url:     {c['shortUrl']}")
+    print(f"list:    {lists_by_id.get(c['idList'], '?')}" + ("  (archived)" if c["closed"] else ""))
+    if pts:
+        print(f"points:  {pts}")
+    if c["idLabels"]:
+        print(f"labels:  {', '.join(labels_by_id.get(i, '?') for i in c['idLabels'])}")
+    if c.get("members"):
+        print(f"members: {', '.join(m['username'] for m in c['members'])}")
+    if c.get("due"):
+        print(f"due:     {c['due'][:10]}" + (" (done)" if c["dueComplete"] else ""))
+    if c["desc"]:
+        print("\n" + c["desc"])
+    for cl in c.get("checklists", []):
+        print(f"\n## {cl['name']}")
+        for it in sorted(cl["checkItems"], key=lambda i: i["pos"]):
+            print(f"  [{'x' if it['state'] == 'complete' else ' '}] {it['name']}")
+    if c.get("attachments"):
+        print("\n## Attachments")
+        for a in c["attachments"]:
+            print(f"  - {a['name']}: {a['url']}")
+    if comments:
+        print("\n## Comments")
+        for a in reversed(comments):
+            print(f"  [{a['date'][:16].replace('T', ' ')}] {a['memberCreator']['username']}: {a['data']['text']}")
+
+
+def cmd_create(args):
+    desc = read_text(args.desc, args.desc_file) or ""
+    body = {
+        "idList": list_id(args, args.list) if args.list else board_lists(args)[0]["id"],
+        "name": with_points(args.title, args.points),
+        "desc": desc,
+        "pos": args.pos,
+    }
+    if args.label:
+        body["idLabels"] = ",".join(label_id(args, l) for l in args.label)
+    if args.member:
+        body["idMembers"] = ",".join(member_id(args, m) for m in args.member)
+    if args.due:
+        body["due"] = args.due
+    c = post("/cards", body)
+    if args.ac:
+        add_checklist(c["id"], AC_CHECKLIST, args.ac)
+    for f in args.attach or []:
+        attach_file(c["id"], f)
+    for other in args.link or []:
+        link_cards(args, c["id"], other)
+    print(f"#{c['idShort']} {c['shortUrl']}  {c['name']}")
+
+
+def cmd_update(args):
+    cid = card_id(args, args.card)
+    body = {}
+    if args.title is not None or args.points is not None:
+        cur = get(f"/cards/{cid}", fields="name")["name"]
+        pts, bare = split_points(cur)
+        title = args.title if args.title is not None else bare
+        body["name"] = with_points(title, args.points if args.points is not None else pts)
+    desc = read_text(args.desc, args.desc_file)
+    if desc is not None:
+        body["desc"] = desc
+    if args.due is not None:
+        body["due"] = args.due or None
+    if body:
+        put(f"/cards/{cid}", body)
+    for l in args.add_label or []:
+        post(f"/cards/{cid}/idLabels", value=label_id(args, l))
+    for l in args.remove_label or []:
+        delete(f"/cards/{cid}/idLabels/{label_id(args, l)}")
+    for m in args.add_member or []:
+        post(f"/cards/{cid}/idMembers", value=member_id(args, m))
+    for m in args.remove_member or []:
+        delete(f"/cards/{cid}/idMembers/{member_id(args, m)}")
+    if args.ac:
+        cl = next((x for x in get(f"/cards/{cid}/checklists") if x["name"] == AC_CHECKLIST), None)
+        if cl:
+            for it in args.ac:
+                post(f"/checklists/{cl['id']}/checkItems", name=it)
+        else:
+            add_checklist(cid, AC_CHECKLIST, args.ac)
+    c = get(f"/cards/{cid}", fields="name,shortUrl,idShort")
+    print(f"#{c['idShort']} {c['shortUrl']}  {c['name']}")
+
+
+def cmd_move(args):
+    cid = card_id(args, args.card)
+    c = put(f"/cards/{cid}", {"idList": list_id(args, args.list), "pos": args.pos})
+    print(f"#{c['idShort']} -> {args.list}")
+
+
+def cmd_comment(args):
+    cid = card_id(args, args.card)
+    text = read_text(args.text, args.file)
+    if not text:
+        die("empty comment")
+    post(f"/cards/{cid}/actions/comments", text=text)
+    print("comment added")
+
+
+def cmd_checklist(args):
+    cid = card_id(args, args.card)
+    add_checklist(cid, args.name, args.items)
+    print(f"checklist '{args.name}' added ({len(args.items)} items)")
+
+
+def cmd_check(args):
+    cid = card_id(args, args.card)
+    items = [(cl, it) for cl in get(f"/cards/{cid}/checklists") for it in cl["checkItems"]]
+    n = args.item.lower()
+    hits = [p for p in items if n in p[1]["name"].lower()]
+    if args.item.isdigit():  # 1-based index over all items in display order
+        flat = [(cl, it) for cl in get(f"/cards/{cid}/checklists")
+                for it in sorted(cl["checkItems"], key=lambda i: i["pos"])]
+        idx = int(args.item) - 1
+        hits = [flat[idx]] if 0 <= idx < len(flat) else []
+    if len(hits) != 1:
+        die(f"item '{args.item}' {'ambiguous' if hits else 'not found'}")
+    _, it = hits[0]
+    state = "incomplete" if args.undo else "complete"
+    put(f"/cards/{cid}/checkItem/{it['id']}", {"state": state})
+    print(f"[{'x' if state == 'complete' else ' '}] {it['name']}")
+
+
+def attach_file(cid, path):
+    path = os.path.expanduser(path)
+    with open(path, "rb") as f:
+        content = f.read()
+    fname = os.path.basename(path)
+    ctype = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+    request("POST", f"/cards/{cid}/attachments", body={"name": fname},
+            files={"file": (fname, content, ctype)})
+
+
+def link_cards(args, cid, other_ref):
+    other = get(f"/cards/{card_id(args, other_ref)}", fields="shortUrl,id")
+    post(f"/cards/{cid}/attachments", url=other["shortUrl"])
+    if getattr(args, "both_ways", False):
+        me = get(f"/cards/{cid}", fields="shortUrl")
+        post(f"/cards/{other['id']}/attachments", url=me["shortUrl"])
+
+
+def cmd_attach(args):
+    cid = card_id(args, args.card)
+    if re.match(r"https?://", args.target):
+        post(f"/cards/{cid}/attachments", url=args.target)
+    else:
+        attach_file(cid, args.target)
+    print("attached")
+
+
+def cmd_link(args):
+    link_cards(args, card_id(args, args.card), args.other)
+    print("linked")
+
+
+def cmd_archive(args):
+    cid = card_id(args, args.card)
+    put(f"/cards/{cid}", {"closed": not args.undo})
+    print("unarchived" if args.undo else "archived")
+
+
+def cmd_search(args):
+    r = get("/search", query=args.query, modelTypes="cards", idBoards=board_ref_id(args),
+            card_fields="name,idList,idLabels,idShort,shortLink", cards_limit=50)
+    cards = r.get("cards", [])
+    if args.json:
+        return out_json(cards)
+    lists_by_id = {l["id"]: l["name"] for l in board_lists(args)}
+    labels_by_id = {l["id"]: label_name(l) for l in board_labels(args)}
+    for c in cards:
+        print(fmt_card(c, lists_by_id, labels_by_id))
+
+
+def board_ref_id(args):
+    return get(f"/boards/{board_ref(args)}", fields="id")["id"]
+
+
+# ---------------------------------------------------------------- argparse
+
+def main():
+    p = argparse.ArgumentParser(prog="trello", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--board", help="board shortLink, id or URL (overrides default)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def sp(name, fn, help_):
+        s = sub.add_parser(name, help=help_)
+        s.set_defaults(fn=fn)
+        return s
+
+    s = sp("use", cmd_use, "set default board"); s.add_argument("target")
+    sp("me", cmd_me, "show authenticated user")
+    for name, fn, h in [("boards", cmd_boards, "list my open boards"), ("lists", cmd_lists, "board lists"),
+                        ("labels", cmd_labels, "board labels"), ("members", cmd_members, "board members")]:
+        sp(name, fn, h).add_argument("--json", action="store_true")
+
+    s = sp("label-create", cmd_label_create, "create board label")
+    s.add_argument("name"); s.add_argument("--color", default=None,
+                                           help="green yellow orange red purple blue sky lime pink black")
+
+    s = sp("cards", cmd_cards, "list cards")
+    s.add_argument("--list"); s.add_argument("--label"); s.add_argument("--mine", action="store_true")
+    s.add_argument("--archived", action="store_true"); s.add_argument("--json", action="store_true")
+
+    s = sp("show", cmd_show, "show card details"); s.add_argument("card"); s.add_argument("--json", action="store_true")
+
+    s = sp("search", cmd_search, "search cards on board"); s.add_argument("query"); s.add_argument("--json", action="store_true")
+
+    s = sp("create", cmd_create, "create a story card")
+    s.add_argument("title")
+    s.add_argument("--list", help="list name (default: first list of board)")
+    s.add_argument("--desc"); s.add_argument("--desc-file", help="markdown file, '-' for stdin")
+    s.add_argument("--points")
+    s.add_argument("--label", action="append", help="repeatable; name or color for unnamed")
+    s.add_argument("--member", action="append", help="username or 'me'; repeatable")
+    s.add_argument("--ac", action="append", help="acceptance criterion; repeatable")
+    s.add_argument("--due", help="ISO date, e.g. 2026-12-01")
+    s.add_argument("--attach", action="append", help="file to attach; repeatable")
+    s.add_argument("--link", action="append", help="related card (attached as card link); repeatable")
+    s.add_argument("--both-ways", action="store_true", help="also link back from the related card")
+    s.add_argument("--pos", default="bottom", help="top|bottom|number")
+
+    s = sp("update", cmd_update, "update a card")
+    s.add_argument("card")
+    s.add_argument("--title"); s.add_argument("--points")
+    s.add_argument("--desc"); s.add_argument("--desc-file")
+    s.add_argument("--due", help="ISO date; '' clears")
+    s.add_argument("--add-label", action="append"); s.add_argument("--remove-label", action="append")
+    s.add_argument("--add-member", action="append"); s.add_argument("--remove-member", action="append")
+    s.add_argument("--ac", action="append", help="append acceptance criterion")
+
+    s = sp("move", cmd_move, "move card to list"); s.add_argument("card"); s.add_argument("list")
+    s.add_argument("--pos", default="bottom")
+
+    s = sp("comment", cmd_comment, "add comment"); s.add_argument("card"); s.add_argument("text", nargs="?")
+    s.add_argument("--file", help="markdown file, '-' for stdin")
+
+    s = sp("checklist", cmd_checklist, "add checklist"); s.add_argument("card"); s.add_argument("name")
+    s.add_argument("items", nargs="+")
+
+    s = sp("check", cmd_check, "tick checklist item (substring or 1-based index)")
+    s.add_argument("card"); s.add_argument("item"); s.add_argument("--undo", action="store_true")
+
+    s = sp("attach", cmd_attach, "attach file or URL"); s.add_argument("card"); s.add_argument("target")
+
+    s = sp("link", cmd_link, "link card to another card"); s.add_argument("card"); s.add_argument("other")
+    s.add_argument("--both-ways", action="store_true")
+
+    s = sp("archive", cmd_archive, "archive card"); s.add_argument("card"); s.add_argument("--undo", action="store_true")
+
+    args = p.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()
