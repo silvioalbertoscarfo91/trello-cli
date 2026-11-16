@@ -49,7 +49,9 @@ sentences, everyday words, no jargon unless it is a technical name). **Tech note
 5. **Versioning and PR rules**: look for tags/releases (`git tag`, `gh release list`), CHANGELOG, version fields
    (package.json, pom.xml, …), commit conventions and branch protection. If the repo has **no versioning**, the
    **first story** of the feature is `Preparación: versionado` (SemVer + Conventional Commits + CHANGELOG + tags,
-   automated releases, PR-title check) and every other story depends on it.
+   automated releases, PR-title check) and every other story depends on it. Ask the user the starting version:
+   pre-1.0 (`v0.1.0` on what is live today, only minor/patch bumps, `bump-minor-pre-major`, `1.0.0` released
+   manually when the team decides) or `v1.0.0` right away.
 6. Look at the board: `trello cards`, `trello labels`, `trello lists` — cards that already cover part of the
    change, labels and lists in use.
 
