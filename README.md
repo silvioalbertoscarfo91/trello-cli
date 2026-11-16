@@ -46,6 +46,7 @@ trello checklist 7 "Tasks" a b c [--replace]
 trello check 7 "criterion 1"       # substring or 1-based index; --undo
 trello attach 7 file.pdf|https://… [--replace]   # URLs are attached once
 trello link 7 4 [--both-ways]
+trello download 7 tech-notes -o -       # file attachment to stdout (-o file, --all -o dir)
 trello label-create "Bug" --color red
 trello list-create "Ready" --after "To Do"
 trello archive 7 [--undo]

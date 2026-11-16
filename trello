@@ -505,6 +505,38 @@ def cmd_attach(args):
     print("attached")
 
 
+def cmd_download(args):
+    """Download a file attachment (Trello requires the OAuth header for attachment downloads)."""
+    cid = card_id(args, args.card)
+    atts = get(f"/cards/{cid}/attachments", fields="name,url,isUpload,id")
+    files = [a for a in atts if a.get("isUpload")]
+    if args.name:
+        n = args.name.lower()
+        files = [a for a in files if a["id"] == args.name or a["name"].lower() == n] or \
+                [a for a in files if n in a["name"].lower()]
+    if not files:
+        die("no matching file attachment")
+    if len(files) > 1 and not args.all:
+        die("several attachments match: " + ", ".join(a["name"] for a in files) + " (use a name or --all)")
+    k = auth()
+    hdr = {"Authorization": f'OAuth oauth_consumer_key="{k["key"]}", oauth_token="{k["token"]}"'}
+    for a in files:
+        req = urllib.request.Request(a["url"], headers=hdr)
+        try:
+            with urllib.request.urlopen(req) as r:
+                data = r.read()
+        except urllib.error.HTTPError as e:
+            die(f"download {a['name']} -> {e.code}")
+        if args.out == "-":
+            sys.stdout.write(data.decode("utf-8", errors="replace"))
+        else:
+            dest = args.out if (args.out and not args.all) else os.path.join(args.out or ".", a["name"])
+            os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+            with open(dest, "wb") as f:
+                f.write(data)
+            print(dest)
+
+
 def cmd_link(args):
     link_cards(args, card_id(args, args.card), args.other)
     print("linked")
@@ -612,6 +644,11 @@ def main():
 
     s = sp("link", cmd_link, "link card to another card"); s.add_argument("card"); s.add_argument("other")
     s.add_argument("--both-ways", action="store_true")
+
+    s = sp("download", cmd_download, "download file attachment(s) of a card")
+    s.add_argument("card"); s.add_argument("name", nargs="?", help="attachment name (or substring) or id")
+    s.add_argument("-o", "--out", help="output file, directory (with --all) or '-' for stdout")
+    s.add_argument("--all", action="store_true", help="download every matching attachment")
 
     s = sp("archive", cmd_archive, "archive card"); s.add_argument("card"); s.add_argument("--undo", action="store_true")
 
