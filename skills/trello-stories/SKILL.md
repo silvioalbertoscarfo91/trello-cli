@@ -31,9 +31,12 @@ sentences, everyday words, no jargon unless it is a technical name). **Tech note
 2. **What to build or change**: the goal in the user's words — a new feature, or a modification of existing
    behaviour (also refactoring or a bug that needs several steps).
    Ask for links to designs, tickets, docs, examples if they exist.
-3. **Board and placement**: board (default from `trello use`), target list (default: first list, usually
-   "To Do"), label(s) for this change (existing label, or create one with the user's OK, e.g. one label per
-   feature acting as the epic), members to assign (default none).
+3. **Feature name**: every run of this skill is ONE feature. Its name becomes the feature label put on every
+   card (`feature` in stories.json; created if missing). Propose a short name (e.g. "Web Angular") and confirm it.
+   Never reuse the label of another feature.
+4. **Board and placement**: board (default from `trello use`), target list (default: first list; if the board
+   separates raw ideas from ready stories, e.g. "To Do" → "Ready", use the ready list), members to assign
+   (ask; "me" = the user running the skill).
 
 ## Phase 1 – Read everything (no writing yet)
 1. Clone each repo into a temporary working folder: `git clone -q --depth 1 <url>` (local path: read in place,
@@ -43,8 +46,12 @@ sentences, everyday words, no jargon unless it is a technical name). **Tech note
 3. Map the code areas the change touches: modules, entry points, data model/migrations, API, UI screens,
    config, tests. Verify facts in the code; quote file paths, not memory.
 4. Check what already exists (half-done work, flags, similar features to copy) so no story repeats done work.
-5. Look at the board: `trello cards`, `trello labels` — cards that already cover part of the change, and the
-   labels in use.
+5. **Versioning and PR rules**: look for tags/releases (`git tag`, `gh release list`), CHANGELOG, version fields
+   (package.json, pom.xml, …), commit conventions and branch protection. If the repo has **no versioning**, the
+   **first story** of the feature is `Preparación: versionado` (SemVer + Conventional Commits + CHANGELOG + tags,
+   automated releases, PR-title check) and every other story depends on it.
+6. Look at the board: `trello cards`, `trello labels`, `trello lists` — cards that already cover part of the
+   change, labels and lists in use.
 
 ## Phase 2 – Open points
 Write a numbered list of everything the request does not decide or where the code suggests another way
@@ -72,6 +79,11 @@ uncovered parts explicitly. Wait for OK before Phase 5.
 
 Titles: Spanish, short, form `<repo>: …`, `Preparación: …`, `<Nombre corto>: …`. Points go in `stories.json`,
 the script puts them in the title as `[3] …`.
+
+**Order = work order.** List the stories in the plan, and later in `stories.json`, in the order they should be
+done (every blocker before the stories it blocks; the script checks it). On `--apply` the cards are placed
+top-to-bottom in that order in the target list, so the first card on top is the first one to take. Cards with
+"Bloqueada por: ninguna" can start right away.
 
 ## Phase 5 – Write the stories
 For every story write two files in the working folder, following the templates exactly:
@@ -102,10 +114,14 @@ points left, where `decisions.md` and `rendered/` are.
 Same phases, but the cards exist. Read them with `trello show <card> --json`. Rewrite only the cards the user
 names; before rewriting a card that is in progress, check its comments and the repo for branches/PRs so no
 running work is overwritten. In `stories.json` give each existing story its `card` (number, shortLink or URL):
-the script updates title, points, description, checklist (replaced) and attachment (replaced by name), and adds
-missing links. New stories (no `card`) in the same file get created.
+the script updates title, points, labels, members, description, checklist (replaced) and attachment (replaced
+by name), adds missing links and re-orders the cards that are still in the target list. Delete the old
+`stories.json.state.json` before a review run (it marks steps as done). New stories (no `card`) in the same file get created.
 
 ## Conventions
+- One run = one feature = one feature label on every card (`feature` in stories.json).
+- **Every code change is delivered through a pull request** against the default branch, never pushed directly;
+  this rule is in every card ("Detalles técnicos") and in the agent workflow of every md.
 - Card title: `[<points>] <Spanish title>`.
 - Description sections (bold headings): **Qué**, **Para quién**, **Por qué**, **Criterios de aceptación**,
   **Dependencias** (`Bloqueada por:` / `Bloquea:` with card URLs — Trello renders them as card previews),
@@ -114,5 +130,7 @@ missing links. New stories (no `card`) in the same file get created.
 - Dependencies: Trello has no "blocks" link type → written in the description of both cards AND attached as
   card links on both cards.
 - Attachment: `<project>_<Sxx>_<slug>_tech-notes.md`, one per story, English.
-- Labels: the change's label on every card (ask). No members unless the user asks.
+- Labels: the feature label on every card, plus extra labels only if the user asks. Members: as the user says
+  (`members` in stories.json, applied to new and existing cards).
+- Order: cards in the target list top-to-bottom = work order (= stories.json order).
 - Never write to Trello without the user's OK on the concrete content.

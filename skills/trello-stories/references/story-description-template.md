@@ -25,6 +25,7 @@ Bloquea: {{BLOCKS_LINKS}}
 
 **Detalles técnicos**
 Ver adjunto _{{ATTACHMENT}}_ (en inglés, para la implementación).
+Todo cambio de código se entrega con una Pull Request (nunca directo a la rama principal).
 
 **Referencias**
 - [<título>](<url>)   (diseño, documento, ticket; quitar la sección si no hay)

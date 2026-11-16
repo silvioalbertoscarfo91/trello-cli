@@ -5,12 +5,15 @@
 2. Default branch: `gh repo view <org>/<repo> --json defaultBranchRef` (or `git remote show origin`). Branch
    `feature/{{SHORTLINK}}-<short-slug>` from it; the PR targets it. Never base the work on another feature branch
    unless the developer tells you so.
+   **Every code change goes through a pull request.** Never push to the default branch directly, not even small
+   fixes; the PR is merged only after review and green checks.
 3. Implement only the scope of this story. Work that belongs to another story (see "Blocked by" / "Blocks") stays
    out; if this story cannot be done without it, stop and report.
 4. Write the tests of the "Tests" section plus anything the "Done when" list needs. Run the full build and test
    suite locally; it must be green.
-5. Commit messages and PR title: short, imperative, in English, describing what changed. No AI/assistant
-   attribution in commits or PR. PR description: what changed and why, how it was tested, and the Trello card
+5. Commit messages and PR title: short, imperative, in English, describing what changed; if the repo uses
+   Conventional Commits (see its versioning setup), follow them (`feat: …`, `fix: …`, `chore: …`; `!` for breaking
+   changes). No AI/assistant attribution in commits or PR. PR description: what changed and why, how it was tested, and the Trello card
    {{URL}}.
 6. **If anything is unclear, contradicts the code, or a business rule is missing: do not guess.** Stop, write the
    question (with the options you see and your recommendation) to the developer, and continue only with the answer.

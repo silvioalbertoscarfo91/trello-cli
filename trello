@@ -293,7 +293,7 @@ def cmd_label_create(args):
 
 
 def cmd_cards(args):
-    fields = "name,idList,idLabels,idShort,shortLink,due,idMembers"
+    fields = "name,idList,idLabels,idShort,shortLink,due,idMembers,pos"
     if args.list:
         cards = get(f"/lists/{list_id(args, args.list)}/cards", fields=fields)
     else:
@@ -309,7 +309,7 @@ def cmd_cards(args):
     lists_by_id = {l["id"]: l["name"] for l in board_lists(args)}
     labels_by_id = {l["id"]: label_name(l) for l in board_labels(args)}
     order = {l["id"]: i for i, l in enumerate(board_lists(args))}
-    for c in sorted(cards, key=lambda c: (order.get(c["idList"], 99), c["idShort"])):
+    for c in sorted(cards, key=lambda c: (order.get(c["idList"], 99), c.get("pos", 0))):
         print(fmt_card(c, lists_by_id, labels_by_id))
 
 
@@ -390,12 +390,18 @@ def cmd_update(args):
         body["due"] = args.due or None
     if body:
         put(f"/cards/{cid}", body)
+    if args.add_label or args.add_member:
+        cur = get(f"/cards/{cid}", fields="idLabels,idMembers")
     for l in args.add_label or []:
-        post(f"/cards/{cid}/idLabels", value=label_id(args, l))
+        lid = label_id(args, l)
+        if lid not in cur["idLabels"]:
+            post(f"/cards/{cid}/idLabels", value=lid)
     for l in args.remove_label or []:
         delete(f"/cards/{cid}/idLabels/{label_id(args, l)}")
     for m in args.add_member or []:
-        post(f"/cards/{cid}/idMembers", value=member_id(args, m))
+        mid = member_id(args, m)
+        if mid not in cur["idMembers"]:
+            post(f"/cards/{cid}/idMembers", value=mid)
     for m in args.remove_member or []:
         delete(f"/cards/{cid}/idMembers/{member_id(args, m)}")
     if args.ac:
