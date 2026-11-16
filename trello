@@ -272,6 +272,21 @@ def cmd_members(args):
         print(f"{m['username']:<24} {m['fullName']}")
 
 
+def cmd_list_create(args):
+    lists = get(f"/boards/{board_ref(args)}/lists", fields="name,pos")
+    if any(l["name"].lower() == args.name.lower() for l in lists):
+        die(f"list '{args.name}' already exists")
+    pos = "bottom"
+    if args.after:
+        a = pick(lists, args.after, "name", "list")
+        i = next(n for n, l in enumerate(lists) if l["id"] == a["id"])
+        pos = (a["pos"] + lists[i + 1]["pos"]) / 2 if i + 1 < len(lists) else "bottom"
+    elif args.top:
+        pos = "top"
+    l = post("/lists", {"name": args.name, "idBoard": board_ref_id(args), "pos": pos})
+    print(f"{l['id']}  {l['name']}")
+
+
 def cmd_label_create(args):
     l = post(f"/boards/{board_ref(args)}/labels", name=args.name, color=args.color)
     print(f"{l['id']}  {l['color']}  {l['name']}")
@@ -529,6 +544,10 @@ def main():
     for name, fn, h in [("boards", cmd_boards, "list my open boards"), ("lists", cmd_lists, "board lists"),
                         ("labels", cmd_labels, "board labels"), ("members", cmd_members, "board members")]:
         sp(name, fn, h).add_argument("--json", action="store_true")
+
+    s = sp("list-create", cmd_list_create, "create board list")
+    s.add_argument("name"); s.add_argument("--after", help="place right after this list")
+    s.add_argument("--top", action="store_true", help="place as first list")
 
     s = sp("label-create", cmd_label_create, "create board label")
     s.add_argument("name"); s.add_argument("--color", default=None,
